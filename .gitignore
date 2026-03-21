@@ -45,3 +45,9 @@
 OSG/ 
 3rdParty/ 
 OpenSceneGraph-Data/ 
+*.vcxproj.user
+/*.user
+/build
+*.zip
+/glew
+*.rar

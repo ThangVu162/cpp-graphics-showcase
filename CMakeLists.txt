@@ -8,6 +8,7 @@ set(CMAKE_CXX_STANDARD 14)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+
 # -------------------------------------------------------
 # OSG Root - user có thể override bằng -DOSG_ROOT=...
 # Mặc định tìm trong thư mục cùng cấp với CMakeLists.txt
@@ -46,17 +47,64 @@ if(NOT EXISTS "${OSG_INCLUDE_DIR}/osg/Node")
 endif()
 
 # -------------------------------------------------------
-# Source files
+# Source files - tự động glob toàn bộ src/
 # -------------------------------------------------------
-set(SOURCES
-    main.cpp
-    # Thêm file mới vào đây khi project lớn dần:
-    # src/HardwareInstancing.cpp
-    # src/GeometryChunker.cpp
-    # src/BVHPicker.cpp
+file(GLOB_RECURSE SOURCES
+    CONFIGURE_DEPENDS
+    "src/*.cpp"
+    "src/*.h"
 )
 
-add_executable(OsgViewer ${SOURCES})
+if(NOT SOURCES)
+    message(FATAL_ERROR "Không tìm thấy source files trong src/")
+endif()
+
+message(STATUS "Sources:")
+foreach(SRC ${SOURCES})
+    message(STATUS "  ${SRC}")
+endforeach()
+
+# Tự tổ chức file vào filters trong VS Solution Explorer
+# src/Foo.cpp         → Source Files
+# src/sub/Bar.cpp     → Source Files/sub
+# shaders/a.vert      → Shaders
+file(GLOB_RECURSE SHADER_FILES
+    CONFIGURE_DEPENDS
+    "shaders/*"
+)
+
+source_group(TREE "${CMAKE_SOURCE_DIR}/src"
+    PREFIX "Source Files"
+    FILES ${SOURCES}
+)
+
+source_group(TREE "${CMAKE_SOURCE_DIR}/shaders"
+    PREFIX "Shaders"
+    FILES ${SHADER_FILES}
+)
+
+# Them shader files vao project de hien thi trong VS
+# (khong compile, chi de xem/edit tien)
+add_executable(OsgViewer ${SOURCES} ${SHADER_FILES})
+
+# -------------------------------------------------------
+# Shaders: copy toàn bộ thư mục shaders/ vào output
+# Dùng copy_directory để giữ nguyên cấu trúc folder
+# -------------------------------------------------------
+set(SHADER_SRC_DIR "${CMAKE_SOURCE_DIR}/shaders")
+set(SHADER_DST_DIR "$<TARGET_FILE_DIR:OsgViewer>/shaders")
+
+if(EXISTS "${SHADER_SRC_DIR}")
+    add_custom_command(TARGET OsgViewer POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+            "${SHADER_SRC_DIR}"
+            "${SHADER_DST_DIR}"
+        COMMENT "Copying shaders/ -> output/shaders/"
+    )
+    message(STATUS "Shaders dir: ${SHADER_SRC_DIR}")
+else()
+    message(WARNING "Không tìm thấy thư mục shaders/ - shader files sẽ không được copy")
+endif()
 
 # -------------------------------------------------------
 # Include directories
@@ -64,6 +112,7 @@ add_executable(OsgViewer ${SOURCES})
 target_include_directories(OsgViewer PRIVATE
     ${OSG_INCLUDE_DIR}
     ${THIRDPARTY_INCLUDE_DIR}
+    "${CMAKE_SOURCE_DIR}/src"   # de #include giua cac file trong src/
 )
 
 # -------------------------------------------------------
@@ -85,6 +134,7 @@ if(MSVC)
         debug     osgUtild      optimized osgUtil
         debug     osgTextd      optimized osgText
         debug     OpenThreadsd  optimized OpenThreads
+		debug     glew32d       optimized glew32
         opengl32
         glu32
     )
@@ -120,9 +170,11 @@ if(WIN32)
         COMMENT "Copying 3rdParty DLLs..."
     )
 
-    # Set OSG_FILE_PATH để OSG tìm được Data folder
+    # Set OSG_FILE_PATH va working directory cho VS debugger
     set_target_properties(OsgViewer PROPERTIES
         VS_DEBUGGER_ENVIRONMENT
-        "PATH=${OSG_ROOT}/bin;${THIRDPARTY_ROOT}/bin;$ENV{PATH}\nOSG_FILE_PATH=${OSG_DATA_DIR}"
+            "PATH=${OSG_ROOT}/bin;${THIRDPARTY_ROOT}/bin;$ENV{PATH}\nOSG_FILE_PATH=${OSG_DATA_DIR}"
+        VS_DEBUGGER_WORKING_DIRECTORY
+            "$<TARGET_FILE_DIR:OsgViewer>"
     )
 endif()

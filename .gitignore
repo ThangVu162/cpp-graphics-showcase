@@ -42,3 +42,6 @@
 /.vs
 /.vs
 /OsgViewer
+OSG/ 
+3rdParty/ 
+OpenSceneGraph-Data/ 

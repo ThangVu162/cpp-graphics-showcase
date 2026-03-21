@@ -9,7 +9,6 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 
-
 # -------------------------------------------------------
 # OSG Root - user có thể override bằng -DOSG_ROOT=...
 # Mặc định tìm trong thư mục cùng cấp với CMakeLists.txt

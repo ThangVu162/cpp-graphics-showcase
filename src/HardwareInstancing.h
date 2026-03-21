@@ -31,14 +31,14 @@ typedef unsigned int GLuint;
 // -------------------------------------------------------
 struct TransformBufferCallback : public osg::Drawable::DrawCallback
 {
-    mutable GLuint tbo = 0, tboTex = 0;  // transforms
-    mutable GLuint cbo = 0, cboTex = 0;  // colors
+    mutable GLuint tbo    = 0, tboTex = 0;  // transforms
+    mutable GLuint cbo    = 0, cboTex = 0;  // colors
     mutable bool   initialized = false;
 
     int                       numInstances = 0;
     std::vector<osg::Matrixf> matrices;
-    std::vector<osg::Vec4>* colors = nullptr;
-    int* dirtyFlag = nullptr;
+    std::vector<osg::Vec4>*   colors    = nullptr;
+    int*                      dirtyFlag  = nullptr;
 
     TransformBufferCallback(
         const std::vector<osg::Matrixf>& mats,
@@ -48,15 +48,10 @@ struct TransformBufferCallback : public osg::Drawable::DrawCallback
         , numInstances((int)mats.size())
         , colors(colorVec)
         , dirtyFlag(dirty)
-    {
-    }
+    {}
 
-    // Callback la owner cua colors va dirtyFlag
-    virtual ~TransformBufferCallback()
-    {
-        delete colors;
-        delete dirtyFlag;
-    }
+    // Implementation trong .cpp (can glew.h)
+    virtual ~TransformBufferCallback();
 
     void drawImplementation(
         osg::RenderInfo& renderInfo,
@@ -81,14 +76,14 @@ class HardwareInstancing
 public:
     struct Config
     {
-        int          gridX = 100;
-        int          gridZ = 100;
-        float        spacing = 2.5f;
-        float        minScale = 0.3f;
-        float        maxScale = 1.2f;
+        int          gridX     = 100;
+        int          gridZ     = 100;
+        float        spacing   = 2.5f;
+        float        minScale  = 0.3f;
+        float        maxScale  = 1.2f;
         float        minHeight = 0.5f;
         float        maxHeight = 3.5f;
-        unsigned int seed = 12345u;
+        unsigned int seed      = 12345u;
     };
 
     explicit HardwareInstancing(const Config& cfg = Config());
@@ -110,6 +105,6 @@ private:
     int                       m_instanceCount;
     std::vector<osg::Matrixf> m_matrices;
     std::vector<osg::Vec4>    m_savedColors;
-    std::vector<osg::Vec4>* m_colors = nullptr;
-    int* m_dirty = nullptr;
+    std::vector<osg::Vec4>*   m_colors   = nullptr;
+    int*                      m_dirty    = nullptr;
 };

@@ -48,6 +48,22 @@ void main()
 )";
 
 // -------------------------------------------------------
+// TransformBufferCallback destructor - cleanup GL resources
+// -------------------------------------------------------
+TransformBufferCallback::~TransformBufferCallback()
+{
+    if (initialized)
+    {
+        if (tbo)    glDeleteBuffers(1, &tbo);
+        if (tboTex) glDeleteTextures(1, &tboTex);
+        if (cbo)    glDeleteBuffers(1, &cbo);
+        if (cboTex) glDeleteTextures(1, &cboTex);
+    }
+    delete colors;
+    delete dirtyFlag;
+}
+
+// -------------------------------------------------------
 // TransformBufferCallback::drawImplementation
 // Giong het production: init GLEW, tao TBO, bind, draw
 // -------------------------------------------------------
@@ -62,7 +78,7 @@ void TransformBufferCallback::drawImplementation(
         if (err != GLEW_OK)
         {
             std::cerr << "[TBO] GLEW init failed: "
-                << glewGetErrorString(err) << "\n";
+                      << glewGetErrorString(err) << "\n";
             return;
         }
         glGetError(); // clear GL_INVALID_ENUM do glewInit co the sinh ra
@@ -88,7 +104,7 @@ void TransformBufferCallback::drawImplementation(
         glTexBuffer(GL_TEXTURE_BUFFER, GL_RGBA32F, cbo);
 
         initialized = true;
-        *dirtyFlag = 0;
+        *dirtyFlag  = 0;
         std::cout << "[TBO] Initialized " << numInstances << " instances\n";
     }
 
@@ -130,9 +146,8 @@ void TransformBufferCallback::drawImplementation(
 // -------------------------------------------------------
 HardwareInstancing::HardwareInstancing(const Config& cfg)
     : m_cfg(cfg)
-    , m_instanceCount(cfg.gridX* cfg.gridZ)
-{
-}
+    , m_instanceCount(cfg.gridX * cfg.gridZ)
+{}
 
 HardwareInstancing::~HardwareInstancing()
 {
@@ -140,7 +155,7 @@ HardwareInstancing::~HardwareInstancing()
     // TransformBufferCallback sau khi createScene() duoc goi.
     // Chi delete neu createScene() chua duoc goi (ownership chua chuyen).
     if (m_colors) { delete m_colors; m_colors = nullptr; }
-    if (m_dirty) { delete m_dirty;  m_dirty = nullptr; }
+    if (m_dirty)  { delete m_dirty;  m_dirty  = nullptr; }
 }
 
 // -------------------------------------------------------
@@ -153,7 +168,7 @@ osg::ref_ptr<osg::Geometry> HardwareInstancing::createBoxGeometry()
     geom->setUseDisplayList(false);
     geom->setDataVariance(osg::Object::STATIC);
 
-    osg::ref_ptr<osg::Vec3Array> verts = new osg::Vec3Array();
+    osg::ref_ptr<osg::Vec3Array> verts   = new osg::Vec3Array();
     osg::ref_ptr<osg::Vec3Array> normals = new osg::Vec3Array();
 
     struct Face { osg::Vec3 n; osg::Vec3 v[4]; };
@@ -184,8 +199,8 @@ osg::ref_ptr<osg::Geometry> HardwareInstancing::createBoxGeometry()
     for (int f = 0; f < 6; ++f)
     {
         int b = f * 4;
-        idx->push_back(b);   idx->push_back(b + 1); idx->push_back(b + 2);
-        idx->push_back(b);   idx->push_back(b + 2); idx->push_back(b + 3);
+        idx->push_back(b);   idx->push_back(b+1); idx->push_back(b+2);
+        idx->push_back(b);   idx->push_back(b+2); idx->push_back(b+3);
     }
     idx->setNumInstances(m_instanceCount); // key cho hardware instancing
 
@@ -209,7 +224,7 @@ void HardwareInstancing::generateInstanceData()
     srand(m_cfg.seed);
     auto randf = [](float lo, float hi) -> float {
         return lo + (hi - lo) * (rand() / (float)RAND_MAX);
-        };
+    };
 
     float totalW = (m_cfg.gridX - 1) * m_cfg.spacing;
     float totalD = (m_cfg.gridZ - 1) * m_cfg.spacing;
@@ -220,9 +235,9 @@ void HardwareInstancing::generateInstanceData()
         {
             int i = zi * m_cfg.gridX + xi;
 
-            float sx = randf(m_cfg.minScale, m_cfg.maxScale);
+            float sx = randf(m_cfg.minScale,  m_cfg.maxScale);
             float sy = randf(m_cfg.minHeight, m_cfg.maxHeight);
-            float sz = randf(m_cfg.minScale, m_cfg.maxScale);
+            float sz = randf(m_cfg.minScale,  m_cfg.maxScale);
 
             float px = xi * m_cfg.spacing - totalW * 0.5f;
             float pz = zi * m_cfg.spacing - totalD * 0.5f;
@@ -230,13 +245,13 @@ void HardwareInstancing::generateInstanceData()
 
             // Scale + Translate (column-major, giong osg::Matrixf layout)
             osg::Matrixf mat = osg::Matrixf::scale(sx, sy, sz)
-                * osg::Matrixf::translate(px / sx, py / sy, pz / sz);
+                             * osg::Matrixf::translate(px / sx, py / sy, pz / sz);
             // Cach don gian hon: set truc tiep
             mat = osg::Matrixf(
-                sx, 0, 0, 0,
-                0, sy, 0, 0,
-                0, 0, sz, 0,
-                px, py, pz, 1
+                sx,   0,    0,    0,
+                0,    sy,   0,    0,
+                0,    0,    sz,   0,
+                px,   py,   pz,   1
             );
 
             m_matrices[i] = mat;
@@ -256,7 +271,7 @@ void HardwareInstancing::generateInstanceData()
     m_dirty = new int(0);
 
     std::cout << "[HardwareInstancing] Generated " << m_instanceCount
-        << " instances\n";
+              << " instances\n";
 }
 
 // -------------------------------------------------------
@@ -288,7 +303,7 @@ osg::ref_ptr<osg::Program> HardwareInstancing::createShaderProgram()
 {
     osg::ref_ptr<osg::Program> prog = new osg::Program();
     prog->setName("HardwareInstancing");
-    prog->addShader(new osg::Shader(osg::Shader::VERTEX, s_vertSrc));
+    prog->addShader(new osg::Shader(osg::Shader::VERTEX,   s_vertSrc));
     prog->addShader(new osg::Shader(osg::Shader::FRAGMENT, s_fragSrc));
     return prog;
 }
@@ -315,9 +330,9 @@ osg::ref_ptr<osg::Group> HardwareInstancing::createScene()
     // Sau khi tao callback, release ownership khoi HardwareInstancing
     // de destructor khong delete m_colors/m_dirty (callback dang dung)
     std::vector<osg::Vec4>* colorsPtr = m_colors;
-    int* dirtyPtr = m_dirty;
+    int*                    dirtyPtr  = m_dirty;
     m_colors = nullptr;  // transfer ownership sang callback
-    m_dirty = nullptr;
+    m_dirty  = nullptr;
 
     osg::ref_ptr<TransformBufferCallback> cb =
         new TransformBufferCallback(m_matrices, colorsPtr, dirtyPtr);
@@ -349,7 +364,7 @@ osg::ref_ptr<osg::Group> HardwareInstancing::createScene()
     root->addChild(geode);
 
     std::cout << "[HardwareInstancing] Scene ready: "
-        << m_instanceCount << " instances\n";
+              << m_instanceCount << " instances\n";
 
     return root;
 }

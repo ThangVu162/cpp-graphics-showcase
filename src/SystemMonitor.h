@@ -15,7 +15,8 @@
 #include <string>
 #include <sstream>
 #include <iomanip>
-
+#include <functional>
+#include "GeometryChunker.h"
 // -------------------------------------------------------
 // SystemMonitor: cap nhat metrics moi frame
 // -------------------------------------------------------
@@ -201,30 +202,36 @@ public:
         : m_fpsText(fpsText)
         , m_sysText(sysText)
         , m_viewer(viewer)
+        , m_chunkStats(nullptr)
     {}
+
+    void setChunkStats(ChunkStats* stats) { m_chunkStats = stats; }
+
+    // Callback goi moi frame de update bat ky text nao tu ngoai
+    // Dung std::function tranh circular dependency voi AppState
+    void setPerFrameCallback(std::function<void()> cb) { m_perFrameCb = cb; }
 
     void operator()(osg::Node* node, osg::NodeVisitor* nv) override
     {
         m_monitor.update(m_viewer);
         const SystemMonitor::Metrics& m = m_monitor.getMetrics();
 
-        // FPS (to, mau xanh)
+        // FPS
         {
-            char buf[32];
+            char buf[48];
             snprintf(buf, sizeof(buf), "FPS: %.1f  (%.1f ms)",
                      m.fps, m.frameMs);
             m_fpsText->setText(buf);
 
-            // Mau theo performance
             if (m.fps >= 55)
-                m_fpsText->setColor({.3f, 1.f, .3f, 1.f});   // xanh la
+                m_fpsText->setColor({.3f,1.f,.3f,1.f});
             else if (m.fps >= 30)
-                m_fpsText->setColor({1.f, .8f, .2f, 1.f});   // vang
+                m_fpsText->setColor({1.f,.8f,.2f,1.f});
             else
-                m_fpsText->setColor({1.f, .3f, .3f, 1.f});   // do
+                m_fpsText->setColor({1.f,.3f,.3f,1.f});
         }
 
-        // System stats (nho hon)
+        // System stats + chunk counter
         {
             std::ostringstream oss;
             oss << std::fixed << std::setprecision(1);
@@ -232,15 +239,27 @@ public:
                 << "   CPU: " << m.cpuPercent << " %";
             if (m.gpuAvail)
                 oss << "   GPU: " << m.gpuMs << " ms";
+
+            if (m_chunkStats)
+            {
+                int vis   = m_chunkStats->visibleChunks.exchange(0);
+                int total = m_chunkStats->totalChunks.load();
+                oss << "   |   Chunks: " << vis << "/" << total << " visible";
+            }
             m_sysText->setText(oss.str());
         }
+
+        // Goi per-frame callback (update flags, status, ...)
+        if (m_perFrameCb) m_perFrameCb();
 
         traverse(node, nv);
     }
 
 private:
-    SystemMonitor      m_monitor;
-    osgText::Text*     m_fpsText;
-    osgText::Text*     m_sysText;
-    osgViewer::Viewer* m_viewer;
+    SystemMonitor           m_monitor;
+    osgText::Text*          m_fpsText;
+    osgText::Text*          m_sysText;
+    osgViewer::Viewer*      m_viewer;
+    ChunkStats*             m_chunkStats;
+    std::function<void()>   m_perFrameCb;
 };

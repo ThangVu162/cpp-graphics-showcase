@@ -22,51 +22,10 @@
 
 #include "HardwareInstancing.h"
 #include "SystemMonitor.h"
+#include "GeometryChunker.h"
+#include "NaiveScene.h"
 
-// -------------------------------------------------------
-// Naive scene: moi object = 1 ShapeDrawable rieng
-// De thay su khac biet FPS voi instancing
-// -------------------------------------------------------
-static osg::ref_ptr<osg::Group> createNaiveScene(
-    const HardwareInstancing::Config& cfg)
-{
-    osg::ref_ptr<osg::Group> root = new osg::Group();
-
-    srand(cfg.seed);
-    auto randf = [](float lo, float hi) -> float {
-        return lo + (hi - lo) * (rand() / (float)RAND_MAX);
-        };
-
-    float totalW = (cfg.gridX - 1) * cfg.spacing;
-    float totalD = (cfg.gridZ - 1) * cfg.spacing;
-
-    for (int zi = 0; zi < cfg.gridZ; ++zi)
-        for (int xi = 0; xi < cfg.gridX; ++xi)
-        {
-            float sx = randf(cfg.minScale, cfg.maxScale);
-            float sy = randf(cfg.minHeight, cfg.maxHeight);
-            float sz = randf(cfg.minScale, cfg.maxScale);
-            float px = xi * cfg.spacing - totalW * 0.5f;
-            float pz = zi * cfg.spacing - totalD * 0.5f;
-            float py = sy * 0.5f;
-
-            osg::ref_ptr<osg::Box> box =
-                new osg::Box(osg::Vec3(px, py, pz), sx, sy, sz);
-            osg::ref_ptr<osg::ShapeDrawable> sd = new osg::ShapeDrawable(box);
-            sd->setColor(osg::Vec4(
-                randf(0.35f, 1.f),
-                randf(0.35f, 1.f),
-                randf(0.35f, 1.f), 1.f));
-
-            osg::ref_ptr<osg::Geode> geode = new osg::Geode();
-            geode->addDrawable(sd);
-            root->addChild(geode);
-        }
-
-    std::cout << "[NaiveScene] " << cfg.gridX * cfg.gridZ
-        << " separate draw calls (no instancing)\n";
-    return root;
-}
+// NaiveScene duoc quan ly boi NaiveScene.h
 
 // -------------------------------------------------------
 // HUD
@@ -75,10 +34,19 @@ struct HUDData
 {
     osg::ref_ptr<osgText::Text> title;
     osg::ref_ptr<osgText::Text> fps;
-    osg::ref_ptr<osgText::Text> sys;    // RAM + CPU + GPU
+    osg::ref_ptr<osgText::Text> sys;
     osg::ref_ptr<osgText::Text> status;
+    osg::ref_ptr<osgText::Text> flags;   // trang thai ON/OFF cua tung optimization
     osg::ref_ptr<osgText::Text> hint;
 };
+
+// Helper: tao 1 text badge "[ON]" xanh hoac "[OFF]" do
+static void updateFlag(osgText::Text* t, const std::string& label, bool on)
+{
+    t->setText(label + (on ? " [ON]" : " [OFF]"));
+    t->setColor(on ? osg::Vec4(.3f, 1.f, .3f, 1.f)   // xanh la = ON
+        : osg::Vec4(1.f, .35f, .35f, 1.f)); // do = OFF
+}
 
 static osg::ref_ptr<osg::Camera> createHUD(int w, int h, HUDData& out)
 {
@@ -111,15 +79,20 @@ static osg::ref_ptr<osg::Camera> createHUD(int w, int h, HUDData& out)
         };
 
     out.title = makeText(10, h - 28.f, 18, { 1,1,0,1 },
-        "C++ Graphics Showcase | Phase 2: Hardware Instancing (TBO)");
+        "C++ Graphics Showcase | Phase 3: Chunking + LOD + Culling");
     out.fps = makeText(10, h - 52.f, 16, { .4f,1,.4f,1 },
         "FPS: --");
     out.sys = makeText(10, h - 72.f, 13, { .8f,.8f,.8f,1 },
         "RAM: -- MB   CPU: -- %");
     out.status = makeText(10, h - 92.f, 15, { .9f,.9f,1,1 },
         "");
-    out.hint = makeText(10, 10.f, 13, { .75f,.75f,.75f,1 },
-        "[+]/[-] Grid size  |  [I] Toggle Instancing  |  [Enter] Reload  |  [S] Stats  |  [Esc] Quit");
+
+    // Flags row: hien thi trang thai tung optimization
+    // Chi visible khi o Chunking mode, nen de mau trang ban dau
+    out.flags = makeText(10, h - 112.f, 14, { 1,1,1,1 }, "");
+
+    out.hint = makeText(10, 10.f, 12, { .65f,.65f,.65f,1 },
+        "[+]/[-] Grid  [M] Mode  [F] Frustum  [L] LOD  [P] SmallFeat  [V] Wireframe  [Enter] Reload  [S] Stats");
 
     hud->addChild(geode);
     return hud;
@@ -132,39 +105,89 @@ static osg::ref_ptr<osg::Camera> createHUD(int w, int h, HUDData& out)
 struct AppState
 {
     HardwareInstancing::Config cfg;
-    bool useInstancing = true;
-    bool dirty = false;
 
-    osg::ref_ptr<osg::Group> sceneRoot;    // geometry node (swap khi reload)
-    osg::ref_ptr<osg::Group> masterRoot;   // root chinh
+    // 0 = Instancing, 1 = Chunking, 2 = Naive
+    int  mode = 0;
+    bool dirty = false;
+    bool showWireframe = true;
+
+    ChunkStats* chunkStats = nullptr;
+    GeometryChunker* chunker = nullptr;
+    NaiveScene* naiveScene = nullptr;
+    MonitorCallback* monitorCb = nullptr;
+    osg::ref_ptr<osg::Group> sceneRoot;
+    osg::ref_ptr<osg::Group> masterRoot;
     HUDData                  hud;
+
+    std::string modeName() const
+    {
+        if (mode == 0) return "[INSTANCING]";
+        if (mode == 1) return "[CHUNKING + Frustum Cull]";
+        return "[NAIVE draw calls]";
+    }
 
     void updateStatus()
     {
         std::ostringstream oss;
-        if (useInstancing)
-            oss << "[INSTANCING ON]  ";
-        else
-            oss << "[INSTANCING OFF - Naive draw calls]  ";
-
-        oss << "Grid: " << cfg.gridX << "x" << cfg.gridZ
+        oss << modeName()
+            << "  Grid: " << cfg.gridX << "x" << cfg.gridZ
             << " = " << cfg.gridX * cfg.gridZ << " objects";
-
-        if (dirty)
-            oss << "   <<< Press [Enter] to apply >>>";
-
-        hud.status->setText(oss.str());
-
-        // Warna status: hijau = instancing, kuning = naive
-        if (useInstancing)
-            hud.status->setColor(osg::Vec4(.5f, 1.f, .5f, 1.f));
-        else
-            hud.status->setColor(osg::Vec4(1.f, .8f, .3f, 1.f));
+        if (dirty) oss << "  <<< [Enter] to apply >>>";
+        _applyStatus(oss.str());
+        _applyFlags();
     }
+
+private:
+    void _applyStatus(const std::string& str)
+    {
+        hud.status->setText(str);
+        if (mode == 0)
+            hud.status->setColor({ .5f,1.f,.5f,1.f });
+        else if (mode == 1)
+            hud.status->setColor({ .5f,.8f,1.f,1.f });
+        else
+            hud.status->setColor({ 1.f,.8f,.3f,1.f });
+    }
+
+    void _applyFlags()
+    {
+        if (mode != 1 || !chunker)
+        {
+            // Che flags row khi khong o Chunking mode
+            hud.flags->setText("");
+            return;
+        }
+
+        bool fc = chunker->getFrustumCulling();
+        bool lod = chunker->getLOD();
+        bool sf = chunker->getSmallFeatureCulling();
+
+        // Tao rich-text gia: dung nhieu Text nodes hoac 1 string voi ky hieu
+        // Vi OSG osgText khong ho tro mixed color trong 1 Text node,
+        // nen dung ky hieu de phan biet ON/OFF
+        std::string txt =
+            "[F] Frustum " + std::string(fc ? "■ON " : "□OFF") + "   " +
+            "[L] LOD " + std::string(lod ? "■ON " : "□OFF") + "   " +
+            "[P] SmallFeat " + std::string(sf ? "■ON " : "□OFF") + "   " +
+            "[V] Wireframe " + std::string(showWireframe ? "■ON" : "□OFF");
+
+        hud.flags->setText(txt);
+
+        // Mau tong the: xanh neu tat ca ON, vang neu 1 so OFF, do neu tat ca OFF
+        int onCount = (fc ? 1 : 0) + (lod ? 1 : 0) + (sf ? 1 : 0) + (showWireframe ? 1 : 0);
+        if (onCount == 4)
+            hud.flags->setColor({ .4f,1.f,.4f,1.f });   // tat ca ON → xanh
+        else if (onCount == 0)
+            hud.flags->setColor({ 1.f,.4f,.4f,1.f });   // tat ca OFF → do
+        else
+            hud.flags->setColor({ 1.f,.85f,.3f,1.f });  // 1 so OFF → vang
+    }
+public:
 };
 
 // -------------------------------------------------------
-// Event handler: +/- grid, I toggle, Enter apply
+// Event handler
+// [M] cycle mode, [V] wireframe, [+/-] grid, [Enter] apply
 // -------------------------------------------------------
 class DemoEventHandler : public osgGA::GUIEventHandler
 {
@@ -179,16 +202,14 @@ public:
 
         int key = ea.getKey();
 
-        // Tang grid
         if (key == '+' || key == '=')
         {
-            m_state->cfg.gridX = min(m_state->cfg.gridX + 50, 1000);
-            m_state->cfg.gridZ = min(m_state->cfg.gridZ + 50, 1000);
+            m_state->cfg.gridX = min(m_state->cfg.gridX + 10, 500);
+            m_state->cfg.gridZ = min(m_state->cfg.gridZ + 10, 500);
             m_state->dirty = true;
             m_state->updateStatus();
             return true;
         }
-        // Giam grid
         if (key == '-' || key == '_')
         {
             m_state->cfg.gridX = max(m_state->cfg.gridX - 10, 10);
@@ -197,24 +218,67 @@ public:
             m_state->updateStatus();
             return true;
         }
-        // Toggle instancing
-        if (key == 'i' || key == 'I')
+        // [M] cycle: Instancing(0) → Chunking(1) → Naive(2)
+        if (key == 'm' || key == 'M')
         {
-            m_state->useInstancing = !m_state->useInstancing;
+            m_state->mode = (m_state->mode + 1) % 3;
             m_state->dirty = true;
             m_state->updateStatus();
-            std::cout << "[Demo] Instancing: "
-                << (m_state->useInstancing ? "ON" : "OFF") << "\n";
             return true;
         }
-        // Apply
+        // [V] toggle wireframe chunk bounds
+        if (key == 'v' || key == 'V')
+        {
+            m_state->showWireframe = !m_state->showWireframe;
+            m_state->dirty = true;
+            return true;
+        }
+        // [F] Frustum Culling
+        if (key == 'f' || key == 'F')
+        {
+            if (m_state->chunker) {
+                m_state->chunker->setFrustumCulling(
+                    !m_state->chunker->getFrustumCulling());
+            }
+            else if (m_state->naiveScene) {
+                m_state->naiveScene->setFrustumCulling(
+                    !m_state->naiveScene->getFrustumCulling());
+            }
+            m_state->updateStatus();
+            return true;
+        }
+        // [L] LOD
+        if (key == 'l' || key == 'L')
+        {
+            if (m_state->chunker) {
+                m_state->chunker->setLOD(!m_state->chunker->getLOD());
+            }
+            else if (m_state->naiveScene) {
+                m_state->naiveScene->setLOD(!m_state->naiveScene->getLOD());
+            }
+            m_state->updateStatus();
+            return true;
+        }
+        // [P] Small Feature Culling
+        if (key == 'p' || key == 'P')
+        {
+            if (m_state->chunker) {
+                m_state->chunker->setSmallFeatureCulling(
+                    !m_state->chunker->getSmallFeatureCulling());
+            }
+            else if (m_state->naiveScene) {
+                m_state->naiveScene->setSmallFeatureCulling(
+                    !m_state->naiveScene->getSmallFeatureCulling());
+            }
+            m_state->updateStatus();
+            return true;
+        }
         if (key == osgGA::GUIEventAdapter::KEY_Return ||
             key == osgGA::GUIEventAdapter::KEY_KP_Enter)
         {
             m_state->dirty = true;
             return true;
         }
-
         return false;
     }
 
@@ -223,29 +287,44 @@ private:
 };
 
 // -------------------------------------------------------
-// Rebuild scene (swap sceneRoot trong masterRoot)
+// Rebuild scene
 // -------------------------------------------------------
 static void rebuildScene(AppState& state)
 {
     if (state.sceneRoot.valid())
         state.masterRoot->removeChild(state.sceneRoot);
 
-    if (state.useInstancing)
+    state.chunkStats = nullptr;
+    state.chunker = nullptr;
+    state.naiveScene = nullptr;
+
+    if (state.mode == 0)
     {
         HardwareInstancing inst(state.cfg);
         state.sceneRoot = inst.createScene();
     }
+    else if (state.mode == 1)
+    {
+        GeometryChunker* chunker = new GeometryChunker(state.cfg);
+        state.sceneRoot = chunker->createScene(state.showWireframe);
+        state.chunkStats = chunker->getStats();
+        state.chunker = chunker;
+    }
     else
     {
-        state.sceneRoot = createNaiveScene(state.cfg);
+        NaiveScene* naive = new NaiveScene(state.cfg);
+        state.sceneRoot = naive->createScene();
+        state.naiveScene = naive;
     }
+
+    if (state.monitorCb)
+        state.monitorCb->setChunkStats(state.chunkStats);
 
     state.masterRoot->addChild(state.sceneRoot);
     state.dirty = false;
     state.updateStatus();
 
-    std::cout << "[Demo] Rebuilt: "
-        << (state.useInstancing ? "INSTANCING" : "NAIVE")
+    std::cout << "[Demo] Rebuilt: " << state.modeName()
         << " | " << state.cfg.gridX * state.cfg.gridZ << " objects\n";
 }
 
@@ -266,7 +345,8 @@ int main(int argc, char** argv)
     state.cfg.minHeight = 0.5f;
     state.cfg.maxHeight = 3.5f;
     state.cfg.seed = 12345u;
-    state.useInstancing = true;
+    state.mode = 0;
+    state.showWireframe = true;
 
     // Viewer
     osgViewer::Viewer viewer;
@@ -278,8 +358,78 @@ int main(int argc, char** argv)
 
     // HUD
     osg::ref_ptr<osg::Camera> hudCam = createHUD(1280, 720, state.hud);
-    hudCam->setUpdateCallback(
-        new MonitorCallback(state.hud.fps, state.hud.sys, &viewer));
+    MonitorCallback* monCb = new MonitorCallback(
+        state.hud.fps, state.hud.sys, &viewer);
+    state.monitorCb = monCb;
+
+    // Per-frame callback: cap nhat flags row moi frame
+    monCb->setPerFrameCallback([&state]()
+        {
+            auto badge = [](bool on) -> std::string {
+                return on ? "[ON]  " : "[OFF] ";
+                };
+
+            std::string txt;
+
+            if (state.mode == 0) // Instancing
+            {
+                // Instancing khong co culling/LOD
+                // Hien thi de contrast voi Chunking
+                txt = "[F] Frustum [N/A]  "
+                    "[L] LOD [N/A]  "
+                    "[P] SmallFeat [N/A]  "
+                    "| 1 draw call, no per-instance cull";
+                state.hud.flags->setColor({ .6f,.6f,.6f,1.f }); // xam
+            }
+            else if (state.mode == 1 && state.chunker) // Chunking
+            {
+                bool fc = state.chunker->getFrustumCulling();
+                bool lod = state.chunker->getLOD();
+                bool sf = state.chunker->getSmallFeatureCulling();
+                bool wf = state.showWireframe;
+
+                txt = "[F] Frustum " + badge(fc)
+                    + "[L] LOD " + badge(lod)
+                    + "[P] SmallFeat " + badge(sf)
+                    + "[V] Wireframe " + badge(wf);
+
+                int on = (fc ? 1 : 0) + (lod ? 1 : 0) + (sf ? 1 : 0) + (wf ? 1 : 0);
+                if (on == 4) state.hud.flags->setColor({ .35f,1.f,.35f,1.f });
+                else if (on == 0) state.hud.flags->setColor({ 1.f,.35f,.35f,1.f });
+                else              state.hud.flags->setColor({ 1.f,.85f,.3f, 1.f });
+            }
+            else if (state.mode == 2 && state.naiveScene) // Naive với optimizations
+            {
+                bool fc = state.naiveScene->getFrustumCulling();
+                bool lod = state.naiveScene->getLOD();
+                bool sf = state.naiveScene->getSmallFeatureCulling();
+
+                txt = "[F] Frustum " + badge(fc)
+                    + "[L] LOD " + badge(lod)
+                    + "[P] SmallFeat " + badge(sf)
+                    + "| " + std::to_string(state.cfg.gridX * state.cfg.gridZ)
+                    + " draw calls";
+
+                int on = (fc ? 1 : 0) + (lod ? 1 : 0) + (sf ? 1 : 0);
+                if (on == 3) state.hud.flags->setColor({ .35f,1.f,.35f,1.f });
+                else if (on == 0) state.hud.flags->setColor({ 1.f,.35f,.35f,1.f });
+                else              state.hud.flags->setColor({ 1.f,.85f,.3f, 1.f });
+            }
+            else // fallback
+            {
+                // OSG tu dong frustum cull moi Geode, khong co LOD
+                txt = "[F] Frustum [ON]  "  // OSG auto, khong tat duoc
+                    "[L] LOD [N/A]  "
+                    "[P] SmallFeat [N/A]  "
+                    "| " + std::to_string(state.cfg.gridX * state.cfg.gridZ)
+                    + " draw calls";
+                state.hud.flags->setColor({ 1.f,.8f,.3f,1.f }); // vang
+            }
+
+            state.hud.flags->setText(txt);
+        });
+
+    hudCam->setUpdateCallback(monCb);
     state.masterRoot->addChild(hudCam);
 
     // Build scene lan dau
@@ -301,8 +451,12 @@ int main(int argc, char** argv)
     viewer.home();
 
     std::cout << "Controls:\n"
-        << "  [+]/[-]  : Grid size +/- 10\n"
-        << "  [I]      : Toggle hardware instancing\n"
+        << "  [+]/[-]  : Grid size\n"
+        << "  [M]      : Cycle mode (Instancing/Chunking/Naive)\n"
+        << "  [V]      : Toggle wireframe (Chunking mode)\n"
+        << "  [F]      : Toggle Frustum Culling (Chunking mode)\n"
+        << "  [L]      : Toggle LOD (Chunking mode)\n"
+        << "  [P]      : Toggle Small Feature Culling (Chunking mode)\n"
         << "  [Enter]  : Apply & reload\n"
         << "  [S]      : FPS stats\n"
         << "  [Esc]    : Quit\n\n";

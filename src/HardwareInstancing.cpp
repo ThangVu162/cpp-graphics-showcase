@@ -363,6 +363,21 @@ osg::ref_ptr<osg::Group> HardwareInstancing::createScene()
     osg::ref_ptr<osg::Group> root = new osg::Group();
     root->addChild(geode);
 
+    // --- 6. Build BVH picker ---
+    // unitBB: AABB cua 1 unit box trong local space ([-0.5, 0.5])
+    osg::BoundingBox unitBB(
+        osg::Vec3(-.5f,-.5f,-.5f), osg::Vec3(.5f,.5f,.5f));
+
+    m_picker = std::make_unique<BVHPicker>();
+    m_picker->build(m_matrices, unitBB);
+
+    // Tao proxy geometry (clone cua box geometry, khong co TBO)
+    osg::ref_ptr<osg::Geometry> proxyGeom = createBoxGeometry();
+    // Reset numInstances = 1 cho proxy
+    if (proxyGeom->getNumPrimitiveSets() > 0)
+        proxyGeom->getPrimitiveSet(0)->setNumInstances(0);
+    m_picker->setProxy(proxyGeom, root);
+
     std::cout << "[HardwareInstancing] Scene ready: "
               << m_instanceCount << " instances\n";
 
@@ -384,4 +399,11 @@ void HardwareInstancing::resetInstanceColor(int index)
     if (!m_colors || index < 0 || index >= m_instanceCount) return;
     (*m_colors)[index] = m_savedColors[index];
     *m_dirty = 1;
+}
+
+void HardwareInstancing::resetAllColors()
+{
+    if (!m_colors) return;
+    *m_colors = m_savedColors;
+    *m_dirty  = 1;
 }

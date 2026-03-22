@@ -15,9 +15,11 @@
 #include <osg/RenderInfo>
 #include <osg/BoundingBox>
 #include <osgUtil/SmoothingVisitor>
+#include "BVHPicker.h"
 #include <vector>
 #include <string>
 #include <iostream>
+#include <memory>
 
 // GLuint forward - glew.h chi duoc include trong .cpp (phai truoc gl.h)
 typedef unsigned int GLuint;
@@ -92,8 +94,15 @@ public:
     osg::ref_ptr<osg::Group> createScene();
 
     int  getInstanceCount() const { return m_instanceCount; }
+
+    // Highlight / reset color
     void setInstanceColor(int index, const osg::Vec4& color);
     void resetInstanceColor(int index);
+    void resetAllColors();
+
+    // Tra ve BVHPicker da build san
+    // Goi sau createScene()
+    BVHPicker* getPicker() { return m_picker.get(); }
 
 private:
     osg::ref_ptr<osg::Geometry> createBoxGeometry();
@@ -107,4 +116,5 @@ private:
     std::vector<osg::Vec4>    m_savedColors;
     std::vector<osg::Vec4>*   m_colors   = nullptr;
     int*                      m_dirty    = nullptr;
+    std::unique_ptr<BVHPicker> m_picker;
 };

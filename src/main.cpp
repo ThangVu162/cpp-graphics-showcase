@@ -25,6 +25,7 @@
 #include "SystemMonitor.h"
 #include "GeometryChunker.h"
 #include "NaiveScene.h"
+#include "BVHPicker.h"
 
 // NaiveScene duoc quan ly boi NaiveScene.h
 
@@ -37,7 +38,8 @@ struct HUDData
     osg::ref_ptr<osgText::Text> fps;
     osg::ref_ptr<osgText::Text> sys;
     osg::ref_ptr<osgText::Text> status;
-    osg::ref_ptr<osgText::Text> flags;   // trang thai ON/OFF cua tung optimization
+    osg::ref_ptr<osgText::Text> flags;
+    osg::ref_ptr<osgText::Text> pickInfo; // ket qua pick
     osg::ref_ptr<osgText::Text> hint;
 };
 
@@ -90,10 +92,10 @@ static osg::ref_ptr<osg::Camera> createHUD(int w, int h, HUDData& out)
 
     // Flags row: hien thi trang thai tung optimization
     // Chi visible khi o Chunking mode, nen de mau trang ban dau
-    out.flags  = makeText(10, h-112.f, 14, {1,1,1,1}, "");
-
-    out.hint   = makeText(10, 10.f, 12, {.65f,.65f,.65f,1},
-                    "[+]/[-] Grid  [M] Mode  [F] Frustum  [L] LOD  [P] SmallFeat  [V] Wireframe  [Enter] Reload  [S] Stats");
+    out.flags    = makeText(10, h-112.f, 14, {1,1,1,1}, "");
+    out.pickInfo = makeText(10, h-132.f, 14, {1,.8f,.2f,1}, ""); // vàng
+    out.hint     = makeText(10, 10.f, 12, {.65f,.65f,.65f,1},
+        "[LClick] Pick  [+]/[-] Grid  [M] Mode  [F] Frustum  [L] LOD  [P] SmallFeat  [Enter] Reload  [S] Stats");
 
     hud->addChild(geode);
     return hud;
@@ -115,7 +117,9 @@ struct AppState
     ChunkStats*                        chunkStats   = nullptr;
     std::unique_ptr<GeometryChunker>   chunker;
     std::unique_ptr<NaiveScene>        naiveScene;
+    std::unique_ptr<HardwareInstancing> instancing;  // cho picking
     MonitorCallback*                   monitorCb    = nullptr;
+    int                                pickedIndex  = -1; // instance dang highlight
     osg::ref_ptr<osg::Group> sceneRoot;
     osg::ref_ptr<osg::Group> masterRoot;
     HUDData                  hud;
@@ -135,7 +139,7 @@ struct AppState
             << " = " << cfg.gridX * cfg.gridZ << " objects";
         if (dirty) oss << "  <<< [Enter] to apply >>>";
         _applyStatus(oss.str());
-        _applyFlags();
+        // flags row duoc cap nhat moi frame qua MonitorCallback lambda
     }
 
 private:
@@ -148,40 +152,6 @@ private:
             hud.status->setColor({.5f,.8f,1.f,1.f});
         else
             hud.status->setColor({1.f,.8f,.3f,1.f});
-    }
-
-    void _applyFlags()
-    {
-        if (mode != 1 || !chunker)
-        {
-            // Che flags row khi khong o Chunking mode
-            hud.flags->setText("");
-            return;
-        }
-
-        bool fc = chunker->getFrustumCulling();
-        bool lod = chunker->getLOD();
-        bool sf = chunker->getSmallFeatureCulling();
-
-        // Tao rich-text gia: dung nhieu Text nodes hoac 1 string voi ky hieu
-        // Vi OSG osgText khong ho tro mixed color trong 1 Text node,
-        // nen dung ky hieu de phan biet ON/OFF
-        std::string txt =
-            "[F] Frustum "    + std::string(fc  ? "■ON " : "□OFF") + "   " +
-            "[L] LOD "        + std::string(lod ? "■ON " : "□OFF") + "   " +
-            "[P] SmallFeat "  + std::string(sf  ? "■ON " : "□OFF") + "   " +
-            "[V] Wireframe "  + std::string(showWireframe ? "■ON" : "□OFF");
-
-        hud.flags->setText(txt);
-
-        // Mau tong the: xanh neu tat ca ON, vang neu 1 so OFF, do neu tat ca OFF
-        int onCount = (fc?1:0) + (lod?1:0) + (sf?1:0) + (showWireframe?1:0);
-        if (onCount == 4)
-            hud.flags->setColor({.4f,1.f,.4f,1.f});   // tat ca ON → xanh
-        else if (onCount == 0)
-            hud.flags->setColor({1.f,.4f,.4f,1.f});   // tat ca OFF → do
-        else
-            hud.flags->setColor({1.f,.85f,.3f,1.f});  // 1 so OFF → vang
     }
 public:
 };
@@ -205,16 +175,16 @@ public:
 
         if (key == '+' || key == '=')
         {
-            m_state->cfg.gridX = min(m_state->cfg.gridX + 10, 500);
-            m_state->cfg.gridZ = min(m_state->cfg.gridZ + 10, 500);
+            m_state->cfg.gridX = min(m_state->cfg.gridX + 50, 1000);
+            m_state->cfg.gridZ = min(m_state->cfg.gridZ + 50, 1000);
             m_state->dirty = true;
             m_state->updateStatus();
             return true;
         }
         if (key == '-' || key == '_')
         {
-            m_state->cfg.gridX = max(m_state->cfg.gridX - 10, 10);
-            m_state->cfg.gridZ = max(m_state->cfg.gridZ - 10, 10);
+            m_state->cfg.gridX = max(m_state->cfg.gridX - 50, 10);
+            m_state->cfg.gridZ = max(m_state->cfg.gridZ - 50, 10);
             m_state->dirty = true;
             m_state->updateStatus();
             return true;
@@ -295,11 +265,14 @@ static void rebuildScene(AppState& state)
     state.chunkStats = nullptr;
     state.chunker.reset();
     state.naiveScene.reset();
+    state.instancing.reset();
+    state.pickedIndex = -1;
+    state.hud.pickInfo->setText("");
 
     if (state.mode == 0)
     {
-        HardwareInstancing inst(state.cfg);
-        state.sceneRoot = inst.createScene();
+        state.instancing = std::make_unique<HardwareInstancing>(state.cfg);
+        state.sceneRoot  = state.instancing->createScene();
     }
     else if (state.mode == 1)
     {
@@ -323,6 +296,85 @@ static void rebuildScene(AppState& state)
     std::cout << "[Demo] Rebuilt: " << state.modeName()
               << " | " << state.cfg.gridX * state.cfg.gridZ << " objects\n";
 }
+
+// -------------------------------------------------------
+// PickEventHandler: Left click → BVH pick → highlight
+// -------------------------------------------------------
+class PickEventHandler : public osgGA::GUIEventHandler
+{
+public:
+    PickEventHandler(AppState* s, osgViewer::Viewer* v)
+        : m_state(s), m_viewer(v) {}
+
+    bool handle(const osgGA::GUIEventAdapter& ea,
+                osgGA::GUIActionAdapter&) override
+    {
+        // Chi xu ly left mouse button release
+        if (ea.getEventType() != osgGA::GUIEventAdapter::RELEASE) return false;
+        if (ea.getButton()    != osgGA::GUIEventAdapter::LEFT_MOUSE_BUTTON) return false;
+        if (!m_state->instancing) return false; // chi pick o Instancing mode
+
+        BVHPicker* picker = m_state->instancing->getPicker();
+        if (!picker) return false;
+
+        // Tinh ray tu mouse position
+        osg::Camera* cam = m_viewer->getCamera();
+        osg::Matrix VP  = cam->getViewMatrix() * cam->getProjectionMatrix();
+        osg::Matrix invVP;
+        invVP.invert(VP);
+
+        // NDC → world
+        float mx = ea.getXnormalized();
+        float my = ea.getYnormalized();
+        osg::Vec3d nearPt = osg::Vec3d(mx, my, -1.0) * invVP;
+        osg::Vec3d farPt  = osg::Vec3d(mx, my,  1.0) * invVP;
+        osg::Vec3d rayDir = farPt - nearPt;
+        rayDir.normalize();
+
+        // Reset highlight cu
+        if (m_state->pickedIndex >= 0)
+        {
+            m_state->instancing->resetInstanceColor(m_state->pickedIndex);
+            picker->hideHighlight();
+        }
+
+        // Pick
+        BVHPicker::PickResult result = picker->pick(nearPt, rayDir);
+
+        if (result.instanceIndex >= 0)
+        {
+            // Doi mau instance → vang
+            m_state->instancing->setInstanceColor(
+                result.instanceIndex, osg::Vec4(1.f, 0.9f, 0.1f, 1.f));
+
+            // Hien wireframe highlight box
+            picker->showHighlight(result.instanceIndex);
+
+            m_state->pickedIndex = result.instanceIndex;
+
+            const osg::Vec3d& p = result.hitPoint;
+            char buf[128];
+            snprintf(buf, sizeof(buf),
+                "Pick: Instance #%d  |  Dist: %.1f  |  Pos: (%.1f, %.1f, %.1f)",
+                result.instanceIndex, result.distance,
+                p.x(), p.y(), p.z());
+            m_state->hud.pickInfo->setText(buf);
+            std::cout << buf << "\n";
+        }
+        else
+        {
+            picker->hideHighlight();
+            m_state->pickedIndex = -1;
+            m_state->hud.pickInfo->setText("Pick: no hit");
+        }
+
+        return false; // khong consume event de camera van hoat dong
+    }
+
+private:
+    AppState*          m_state;
+    osgViewer::Viewer* m_viewer;
+};
 
 // -------------------------------------------------------
 // main
@@ -433,6 +485,7 @@ int main(int argc, char** argv)
 
     // Event handlers
     viewer.addEventHandler(new DemoEventHandler(&state));
+    viewer.addEventHandler(new PickEventHandler(&state, &viewer));
     viewer.addEventHandler(new osgViewer::StatsHandler());
 
     // Camera
